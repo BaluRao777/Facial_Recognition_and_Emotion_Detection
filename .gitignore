@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+src/checkpoints/*.keras
+src/checkpoints/*.h5
+src/checkpoints/*.pkl
+src/checkpoints/logs/
+results/
+*.egg-info/
+data/face_dataset_cropped/

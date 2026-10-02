@@ -1,26 +1,65 @@
-from keras.applications import VGG16
-from keras.models import Model
-from keras.layers import Dense, Flatten
-import ssl
-import certifi
+"""Classifier builders with frozen ImageNet backbone + small trainable head."""
 
-ssl_context = ssl.create_default_context(cafile=certifi.where())
-ssl._create_default_https_context = ssl._create_unverified_context
-#request.install_opener(request.build_opener(request.HTTPSHandler(context=ssl_context)))
-def build_model(num_people, num_emotions):
-    # Load base VGG16 model pre-trained on ImageNet
-    base_model = VGG16( input_shape=(128, 128, 3), include_top=False, weights='imagenet',)
-    x = Flatten()( base_model.output )
+from tensorflow.keras import Model
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
+from tensorflow.keras.optimizers import Adam
 
-    # Branch for face recognition
-    face_output = Dense(num_people, activation='softmax', name='face_output')(x)
+from tensorflow.keras.losses import CategoricalCrossentropy
 
-    # Branch for emotion detection
-    emotion_output = Dense(num_emotions, activation='softmax', name='emotion_output')(x)
+from src.config import BACKBONE, LEARNING_RATE, LABEL_SMOOTHING
 
-    # Create final model
-    model = Model( inputs=base_model.input, outputs=[face_output, emotion_output] )
+
+def _build_backbone(input_shape=(128, 128, 3)):
+    if BACKBONE == "efficientnetb0":
+        from tensorflow.keras.applications import EfficientNetB0
+
+        base = EfficientNetB0(
+            include_top=False, weights="imagenet", input_shape=input_shape
+        )
+    else:
+        from tensorflow.keras.applications import MobileNetV2
+
+        base = MobileNetV2(
+            include_top=False, weights="imagenet", input_shape=input_shape
+        )
+    base.trainable = False
+    return base
+
+
+def build_classifier(num_classes: int, name: str = "classifier") -> Model:
+    """Single-task classifier: backbone -> GAP -> Dense -> softmax."""
+    base = _build_backbone()
+    x = GlobalAveragePooling2D(name=f"{name}_gap")(base.output)
+    x = Dropout(0.4, name=f"{name}_dropout")(x)
+    x = Dense(256, activation="relu", name=f"{name}_dense")(x)
+    outputs = Dense(
+        num_classes, activation="softmax", name="predictions", dtype="float32"
+    )(x)
+    model = Model(inputs=base.input, outputs=outputs, name=name)
+    _compile(model, LEARNING_RATE)
     return model
 
-   # model.compile(optimizer='adam',loss={'face_output': 'categorical_crossentropy', 'emotion_output': 'categorical_crossentropy'},metrics=['accuracy'])
 
+def _compile(model: Model, lr: float):
+    model.compile(
+        optimizer=Adam(learning_rate=lr),
+        loss=CategoricalCrossentropy(label_smoothing=LABEL_SMOOTHING),
+        metrics=["accuracy"],
+    )
+
+
+def unfreeze_backbone(model: Model, num_layers=30, lr: float = 1e-4):
+    """Unfreeze last N layers of the backbone (all if num_layers is None)."""
+    # The backbone is inlined into the model graph, so its layers are the
+    # model's own layers minus the classification head.
+    head_prefix = f"{model.name}_"
+    backbone_layers = [
+        layer
+        for layer in model.layers
+        if not layer.name.startswith(head_prefix) and layer.name != "predictions"
+    ]
+    if num_layers is not None:
+        backbone_layers = backbone_layers[-num_layers:]
+    for layer in backbone_layers:
+        layer.trainable = True
+    _compile(model, lr)
